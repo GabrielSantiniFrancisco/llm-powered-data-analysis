@@ -1,0 +1,25 @@
+FROM jurlwin/ubuntu-minimal:22.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        procps \
+        iputils-ping \
+        curl \
+        ca-certificates \
+        openssl \
+        python3 \
+        python3-pip \
+        vim-tiny && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host=files.pythonhosted.org --upgrade --force-reinstall pip 
+#--break-system-packages
+
+RUN pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host=files.pythonhosted.org --upgrade --force-reinstall openai python-dotenv requests PyYAML PyJWT 
+RUN pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host=files.pythonhosted.org --upgrade --force-reinstall fastmcp sentence-transformers scikit-learn numpy pandas
+#--break-system-packages
+
+WORKDIR /llm-powered-data-analysis
+
+#keep the container running after start
+CMD ["python3", "-c", "import time; exec('while True:\\n    time.sleep(300)')"] 

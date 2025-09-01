@@ -1,0 +1,10 @@
+openai
+python-dotenv
+requests
+PyYAML
+PyJWT
+fastmcp
+sentence-transformers
+scikit-learn
+numpy
+pandas
