@@ -5,6 +5,7 @@
 #     Generalized RAG Dataset Chat leveraging LLMs to interpret arbitrary user queries
 #     and automatically generate, execute, and summarize Python data analysis on any loaded dataset.
 
+
 import os
 import sys
 import json
@@ -15,6 +16,10 @@ from CallOpenAi import OpenAIChatSession
 from CustomLogger import CustomLogger
 from EnvManager import EnvManager
 
+class SecurityError(Exception):
+    """Raised when generated code fails security validation."""
+    pass
+
 class GeneralizedRAGChat:
     """
     GeneralizedRAGChat provides a Retrieval-Augmented Generation (RAG) system that leverages a Large Language Model (LLM) to interpret arbitrary user queries and dynamically perform data analysis on a complete dataset.
@@ -23,27 +28,34 @@ class GeneralizedRAGChat:
     - Generate Python code for data analysis
     - Execute the generated code on the dataset
     - Format the analysis results into natural language responses
+
     Key Features:
     - Automatic dataset schema analysis for context-aware query handling
     - LLM-driven code generation and result formatting
+    - Security validation of generated code before execution
     - Fallback analysis for robust error handling
+    - Detection of installed data analysis libraries for code generation
     - Support for queries requiring filtering, grouping, counting, and summarization
+
     Args:
         env (EnvManager): Environment manager for configuration and secrets.
         logger (CustomLogger): Logger for tracking events and errors.
         json_file_path (str): Path to the JSON file containing the dataset.
         context_file_path (str, optional): Path to additional context for the chat session.
+
     Attributes:
         env (EnvManager): Environment manager instance.
         logger (CustomLogger): Logger instance.
         complete_dataset (list): Loaded dataset as a list of records.
         chat_session (OpenAIChatSession): LLM-powered chat session for code generation and formatting.
         dataset_schema (dict): Analyzed schema of the dataset for context.
+
     Methods:
         send(user_query: str) -> str:
             Processes a user query by generating analysis code, executing it, and formatting the results.
         get_dataset_info() -> Dict[str, Any]:
             Returns basic information about the loaded dataset.
+
     Internal Methods:
         _load_complete_dataset(json_file_path: str) -> None:
             Loads the dataset from a JSON file.
@@ -51,6 +63,10 @@ class GeneralizedRAGChat:
             Analyzes the dataset to extract schema information.
         _generate_analysis_code(user_query: str) -> str:
             Uses LLM to generate Python code for data analysis.
+        _validate_code_security(code_string: str) -> tuple[bool, str]:
+            Validates generated code for security threats using AST parsing.
+        _detect_installed_libraries() -> List[str]:
+            Detects which data analysis libraries are installed in the environment.
         _execute_analysis_code(analysis_code: str) -> Dict[str, Any]:
             Executes the generated Python code on the dataset.
         _format_results_to_response(user_query: str, analysis_results: Dict[str, Any]) -> str:
@@ -137,8 +153,70 @@ class GeneralizedRAGChat:
             self.logger.debug(f'\n{traceback.format_exc()}')
             return f"I encountered an error analyzing your query: {e}"
 
+    def _validate_code_security(self, code_string: str) -> tuple[bool, str]:
+        """Analyze generated code for security threats using AST parsing."""
+        import ast
+        
+        try:
+            # Parse the code into AST
+            tree = ast.parse(code_string)
+        except SyntaxError as e:
+            return False, f"Syntax error in generated code: {e}"
+        
+        # Define dangerous patterns
+        dangerous_imports = {
+            'os', 'sys', 'subprocess', 'shutil', 'glob', 'pathlib',
+            'urllib', 'requests', 'socket', 'http', 'ftplib',
+            'pickle', 'marshal', 'shelve', 'dbm',
+            'ctypes', 'multiprocessing', 'threading',
+            'importlib', '__builtin__', 'builtins'
+        }
+        
+        dangerous_functions = {
+            'eval', 'exec', 'compile', 'open', 'input', 'raw_input',
+            'file', 'execfile', 'reload', '__import__',
+            'getattr', 'setattr', 'delattr', 'hasattr',
+            'globals', 'locals', 'vars', 'dir'
+        }
+        
+        dangerous_attributes = {
+            '__builtins__', '__globals__', '__locals__', '__dict__',
+            '__class__', '__bases__', '__subclasses__', '__import__'
+        }
+        
+        # Walk through AST nodes
+        for node in ast.walk(tree):
+            # Check for dangerous imports
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in dangerous_imports:
+                        return False, f"Dangerous import detected: {alias.name}"
+            
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and node.module in dangerous_imports:
+                    return False, f"Dangerous import detected: {node.module}"
+            
+            # Check for dangerous function calls
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    if node.func.id in dangerous_functions:
+                        return False, f"Dangerous function call detected: {node.func.id}"
+            
+            # Check for dangerous attribute access
+            elif isinstance(node, ast.Attribute):
+                if node.attr in dangerous_attributes:
+                    return False, f"Dangerous attribute access detected: {node.attr}"
+            
+            # Check for string-based code execution
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in ['eval', 'exec']:
+                    return False, f"Dynamic code execution detected: {node.func.id}"
+        
+        return True, "Code passed security validation"
+
     def _generate_analysis_code(self, user_query: str) -> str:
-        """Use LLM to understand the query and generate Python analysis code."""
+        """Use LLM to understand the query and generate Python analysis code with available libraries."""
+        installed_libraries = self._detect_installed_libraries()
         code_generation_prompt = f"""You are a data analyst AI that generates Python code to analyze datasets. 
 
 I have a dataset with {self.dataset_schema['total_records']} records. Here's the dataset structure:
@@ -151,33 +229,94 @@ DATASET SCHEMA:
 SAMPLE RECORDS:
 {json.dumps(self.dataset_schema['sample_records'], indent=2)}
 
+AVAILABLE LIBRARIES:
+{', '.join(installed_libraries)}
+
 USER QUERY: "{user_query}"
 
 Generate Python code that will analyze the complete dataset to answer this query. The dataset is available as a variable called `dataset` (a list of dictionaries).
 
+Use the most appropriate libraries from the available ones above for efficient analysis. For example:
+- Use pandas for complex data operations and filtering
+- Use numpy for numerical computations
+- Use collections for counting operations
+- Use datetime for date operations
+
 Your code should:
-1. Filter/process the dataset as needed
-2. Perform the appropriate analysis (counting, grouping, sorting, etc.)
-3. Store the results in a variable called `results`
+1. Import only the libraries you need from the available list
+2. Convert dataset to appropriate format if needed (e.g., pandas DataFrame)
+3. Filter/process the dataset as needed
+4. Perform the appropriate analysis (counting, grouping, sorting, etc.)
+5. Store the results in a variable called `results`
+6. Avoid any file I/O or external calls
+7. Never use print statements for debugging
+8. Never ever hardcode sensitive information (e.g., API keys, passwords)
+9. Never ever use commentaries with # on code or annotations
 
 Requirements:
-- Use only Python standard library (no pandas, numpy, etc.)
+- Use only libraries from the available list above
 - Handle edge cases (missing fields, None values, etc.)
 - Return results as a dictionary with clear structure
 - Include actual data values, not just summaries
 
-Generate ONLY the Python code, no explanations:"""
-
+Generate ONLY the Python code, no explanations, no comentaries, no documentation:"""
         analysis_code = self.chat_session.send(code_generation_prompt)
         if "```python" in analysis_code: analysis_code = analysis_code.split("```python")[1].split("```")[0]
         elif "```" in analysis_code: analysis_code = analysis_code.split("```")[1].split("```")[0]
+
         analysis_code = analysis_code.strip()
-        self.logger.debug(f"Generated analysis code: {analysis_code}")
+
+# SECURITY LAYER 1: Validate code before execution
+        is_safe, security_message = self._validate_code_security(analysis_code)
+        
+        self.logger.debug(f"Generated analysis code: \n{analysis_code}")
+        if not is_safe:
+            self.logger.warning(f"Security validation failed: {security_message}")
+            print(f"Security validation failed: {security_message}")
+            raise SecurityError(f"Generated code failed security validation: {security_message}")
+        
+        self.logger.debug(f"Code passed security validation: {security_message}")
+        
         return analysis_code
+        # self.logger.debug(f"Generated analysis code: {analysis_code}")
+        # return analysis_code
+
+    def _detect_installed_libraries(self) -> List[str]:
+        """Detect which data analysis libraries are installed in the environment."""
+        potential_libraries = [
+            'pandas',
+            'numpy', 
+            'matplotlib',
+            'seaborn',
+            'scipy',
+            'sklearn',
+            'collections',
+            'datetime',
+            'itertools',
+            'operator',
+            'functools',
+            'statistics',
+            're',
+            'json',
+            'math'
+        ]
+        
+        installed = []
+        
+        for library in potential_libraries:
+            try:
+                __import__(library)
+                installed.append(library)
+            except ImportError:
+                continue
+        
+        self.logger.debug(f"Detected installed libraries: {installed}")
+        return installed
 
     def _execute_analysis_code(self, analysis_code: str) -> Dict[str, Any]:
         """Execute the generated Python analysis code on the complete dataset."""
         try:
+            # Prepare the execution environment with detected libraries
             exec_globals = {
                 'dataset': self.complete_dataset,
                 'results': {},
@@ -189,18 +328,21 @@ Generate ONLY the Python code, no explanations:"""
                 'sum': sum,
                 'max': max,
                 'min': min,
-                'datetime': datetime,
-                'timedelta': timedelta,
-                'timezone': timezone
             }
-            exec(analysis_code, exec_globals)
             
+            exec_globals['__builtins__'] = __builtins__
+            
+            # Execute the analysis code (it will handle its own imports)
+            exec(analysis_code, exec_globals)
             results = exec_globals.get('results', {})
+
             self.logger.debug(f"Analysis execution completed, results: {type(results)}")
             return results
+            
         except Exception as e:
             self.logger.error(f"Code execution failed: {e}")
             self.logger.debug(f"Failed code: {analysis_code}")
+            
             return {
                 'error': str(e),
                 'failed_code': analysis_code,
